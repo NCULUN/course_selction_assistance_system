@@ -65,9 +65,6 @@ def calculate_priority_analysis(courses, students):
 
         priority_1_count = int(priority_counts.get(1, 0))
 
-        popularity_ratio = assigned / capacity if not pd.isna(assigned) else len(course_students) / capacity
-        over_capacity = assigned - capacity if not pd.isna(assigned) else len(course_students) - capacity
-
         if cutoff_priority is None:
             recommendation = "報名資料不足，無法判斷"
             no_chance_after_priority = ""
@@ -85,8 +82,6 @@ def calculate_priority_analysis(courses, students):
             "time_room": course.get("time_room", ""),
             "maximum_number": int(capacity),
             "number_of_assigned": int(assigned) if not pd.isna(assigned) else len(course_students),
-            "popularity_ratio": round(popularity_ratio, 3),
-            "over_capacity": int(over_capacity),
             "priority_1_count": priority_1_count,
             "cutoff_priority": cutoff_priority,
             "cutoff_priority_count": cutoff_priority_count,
@@ -150,9 +145,10 @@ def main():
 
     Path("analysis").mkdir(exist_ok=True)
 
+    # 依「門檻志願序中選率」由低到高排序：越難中的課越排前面
     priority_analysis = priority_analysis.sort_values(
-        ["popularity_ratio", "cutoff_priority"],
-        ascending=[False, True]
+        ["cutoff_accept_rate", "cutoff_priority"],
+        ascending=[True, True]
     )
 
     priority_analysis.to_csv(
@@ -179,7 +175,6 @@ def main():
         "course_name",
         "maximum_number",
         "number_of_assigned",
-        "popularity_ratio",
         "priority_1_count",
         "cutoff_priority",
         "cutoff_priority_count",
