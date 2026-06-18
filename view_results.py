@@ -100,7 +100,9 @@ def parse_time_room(time_room):
 def build_schedule_entries(priority_analysis):
     """
     從 course_priority_analysis.csv 裡的 time_room
-    拆成一列一個上課時段的資料
+    拆成一列一個上課時段的資料。
+
+    注意：time_room 只用來建立課表，不再放進熱門課程與志願序分析表。
     """
     entries = []
 
@@ -119,14 +121,12 @@ def build_schedule_entries(priority_analysis):
                 "room": item["room"],
                 "maximum_number": row.get("maximum_number", ""),
                 "number_of_assigned": row.get("number_of_assigned", ""),
-                "popularity_ratio": row.get("popularity_ratio", ""),
                 "cutoff_priority": row.get("cutoff_priority", ""),
                 "cutoff_accept_rate": row.get("cutoff_accept_rate", ""),
                 "recommendation": row.get("recommendation", "")
             })
 
     return pd.DataFrame(entries)
-
 
 def format_percent(value):
     """
@@ -136,6 +136,45 @@ def format_percent(value):
         if pd.isna(value):
             return ""
         return f"{float(value) * 100:.1f}%"
+    except Exception:
+        return ""
+
+
+def format_accept_rate_bar(value):
+    """
+    將中選率顯示成橫向長條圖 + 百分比。
+
+    顏色代表中選難度：
+    0~25%：紅色，競爭最激烈
+    26~50%：橙色
+    51~75%：黃色
+    76~100%：綠色，較容易中選
+    """
+    try:
+        if pd.isna(value):
+            return ""
+
+        rate = float(value)
+        rate = max(0.0, min(rate, 1.0))
+        percent = rate * 100
+
+        if percent <= 25:
+            color_class = "rate-red"
+        elif percent <= 50:
+            color_class = "rate-orange"
+        elif percent <= 75:
+            color_class = "rate-yellow"
+        else:
+            color_class = "rate-green"
+
+        return (
+            "<div class='rate-cell'>"
+            "<div class='rate-bar'>"
+            f"<div class='rate-fill {color_class}' style='width: {percent:.1f}%;'></div>"
+            "</div>"
+            f"<span class='rate-label'>{percent:.1f}%</span>"
+            "</div>"
+        )
     except Exception:
         return ""
 
@@ -154,12 +193,14 @@ def format_ratio(value):
 
 def make_priority_display_table(priority_analysis):
     """
-    製作適合顯示在 HTML 的志願序門檻分析表
+    製作適合顯示在 HTML 的志願序門檻分析表。
+
+    已移除：熱門度倍率、超額人數、原始上課時間地點。
+    排序與判斷改以「門檻志願序中選率」為核心。
     """
     df = priority_analysis.copy()
 
-    df["熱門度倍率"] = df["popularity_ratio"].apply(format_ratio)
-    df["門檻志願序中選率"] = df["cutoff_accept_rate"].apply(format_percent)
+    df["門檻志願序中選率"] = df["cutoff_accept_rate"].apply(format_accept_rate_bar)
 
     display_cols = [
         "course_id",
@@ -167,15 +208,12 @@ def make_priority_display_table(priority_analysis):
         "instructor",
         "maximum_number",
         "number_of_assigned",
-        "熱門度倍率",
-        "over_capacity",
         "priority_1_count",
         "cutoff_priority",
         "cutoff_priority_count",
         "seats_remaining_at_cutoff",
         "門檻志願序中選率",
-        "recommendation",
-        "time_room"
+        "recommendation"
     ]
 
     rename_map = {
@@ -184,32 +222,37 @@ def make_priority_display_table(priority_analysis):
         "instructor": "授課教師",
         "maximum_number": "人數限制",
         "number_of_assigned": "待分發人數",
-        "over_capacity": "超額人數",
         "priority_1_count": "第 1 志願人數",
         "cutoff_priority": "中選門檻志願序",
         "cutoff_priority_count": "門檻志願序人數",
         "seats_remaining_at_cutoff": "門檻志願序剩餘名額",
-        "recommendation": "系統建議",
-        "time_room": "原始上課時間地點"
+        "recommendation": "系統建議"
     }
 
     existing_cols = [col for col in display_cols if col in df.columns]
+    display_df = df[existing_cols].rename(columns=rename_map)
 
-    return df[existing_cols].rename(columns=rename_map)
+    # 因為中選率欄位要放 HTML 長條圖，所以表格輸出會使用 escape=False。
+    # 其他文字欄位先在這裡做 HTML escape，避免課程名稱或教師名稱造成顯示錯誤。
+    raw_html_cols = {"門檻志願序中選率"}
+    for col in display_df.columns:
+        if col not in raw_html_cols:
+            display_df[col] = display_df[col].apply(escape)
 
-
+    return display_df
 
 def make_schedule_detail_table(schedule_entries):
     """
-    製作課表明細表
+    製作課表明細表。
+
+    課表明細保留星期、節次、時間、教室；不顯示熱門度倍率與超額人數。
     """
     if schedule_entries.empty:
         return pd.DataFrame()
 
     df = schedule_entries.copy()
 
-    df["熱門度倍率"] = df["popularity_ratio"].apply(format_ratio)
-    df["門檻志願序中選率"] = df["cutoff_accept_rate"].apply(format_percent)
+    df["門檻志願序中選率"] = df["cutoff_accept_rate"].apply(format_accept_rate_bar)
 
     display_cols = [
         "course_id",
@@ -221,7 +264,6 @@ def make_schedule_detail_table(schedule_entries):
         "room",
         "maximum_number",
         "number_of_assigned",
-        "熱門度倍率",
         "cutoff_priority",
         "門檻志願序中選率",
         "recommendation"
@@ -241,8 +283,15 @@ def make_schedule_detail_table(schedule_entries):
         "recommendation": "系統建議"
     }
 
-    return df[display_cols].rename(columns=rename_map)
+    existing_cols = [col for col in display_cols if col in df.columns]
+    display_df = df[existing_cols].rename(columns=rename_map)
 
+    raw_html_cols = {"門檻志願序中選率"}
+    for col in display_df.columns:
+        if col not in raw_html_cols:
+            display_df[col] = display_df[col].apply(escape)
+
+    return display_df
 
 def build_schedule_grid_html(schedule_entries):
     """
@@ -294,7 +343,6 @@ def build_schedule_grid_html(schedule_entries):
                 html_parts.append("<div class='empty-cell'>—</div>")
             else:
                 for _, row in cell_df.iterrows():
-                    popularity = format_ratio(row.get("popularity_ratio", ""))
                     cutoff_rate = format_percent(row.get("cutoff_accept_rate", ""))
 
                     html_parts.append("<div class='course-card'>")
@@ -314,7 +362,6 @@ def build_schedule_grid_html(schedule_entries):
                     )
                     html_parts.append(
                         f"<div class='course-badges'>"
-                        f"<span>熱門度 {escape(popularity)}</span>"
                         f"<span>門檻志願 {escape(row.get('cutoff_priority', ''))}</span>"
                         f"<span>門檻中選率 {escape(cutoff_rate)}</span>"
                         f"</div>"
@@ -346,11 +393,17 @@ def create_html_report(
 
     html_path = Path("analysis/result_view.html")
 
-    # 排序：熱門度高的排前面
-    priority_analysis = priority_analysis.sort_values(
-        ["popularity_ratio", "cutoff_priority"],
-        ascending=[False, True]
-    )
+    # 排序：中選率低的排前面，代表越難中選、越需要優先注意
+    sort_cols = [
+        col for col in ["cutoff_accept_rate", "cutoff_priority"]
+        if col in priority_analysis.columns
+    ]
+
+    if sort_cols:
+        priority_analysis = priority_analysis.sort_values(
+            sort_cols,
+            ascending=[True] * len(sort_cols)
+        )
 
     priority_display = make_priority_display_table(priority_analysis)
     # student_display = make_student_display_table(student_estimated)
@@ -365,7 +418,7 @@ def create_html_report(
 <html lang="zh-Hant">
 <head>
     <meta charset="UTF-8">
-    <title>通識課熱門度與中選機率分析系統</title>
+    <title>通識課志願序與中選機率分析系統</title>
     <style>
         body {{
             font-family: Arial, "Microsoft JhengHei", sans-serif;
@@ -588,6 +641,49 @@ def create_html_report(
             font-size: 12px;
         }}
 
+        .rate-cell {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 150px;
+        }}
+
+        .rate-bar {{
+            flex: 1;
+            height: 14px;
+            background-color: #edf0f3;
+            border-radius: 999px;
+            overflow: hidden;
+            border: 1px solid #d7dde3;
+        }}
+
+        .rate-fill {{
+            height: 100%;
+            border-radius: 999px;
+        }}
+
+        .rate-label {{
+            min-width: 48px;
+            font-weight: bold;
+            text-align: right;
+        }}
+
+        .rate-red {{
+            background-color: #d9534f;
+        }}
+
+        .rate-orange {{
+            background-color: #f0ad4e;
+        }}
+
+        .rate-yellow {{
+            background-color: #f7d154;
+        }}
+
+        .rate-green {{
+            background-color: #5cb85c;
+        }}
+
         .footer {{
             color: #666;
             font-size: 13px;
@@ -599,9 +695,9 @@ def create_html_report(
 <body>
 
 <header>
-    <h1>通識課熱門度與中選機率分析系統</h1>
+    <h1>通識課志願序與中選機率分析系統</h1>
     <p>
-        本頁整合課程基本資料、修課名單、熱門度倍率、志願序門檻、預估中選率與課表顯示。
+        本頁整合課程基本資料、修課名單、志願序門檻、預估中選率與課表顯示。
     </p>
 </header>
 
@@ -627,7 +723,7 @@ def create_html_report(
     </section>
 
     <div class="tabs">
-        <button class="tab-button active" onclick="openTab(event, 'tabTop')">熱門課程前 10 名</button>
+        <button class="tab-button active" onclick="openTab(event, 'tabTop')">最難中選課程前 10 名</button>
         <button class="tab-button" onclick="openTab(event, 'tabPriority')">志願序門檻分析</button>
         <button class="tab-button" onclick="openTab(event, 'tabSchedule')">課表顯示</button>
         <button class="tab-button" onclick="openTab(event, 'tabScheduleDetail')">課表明細</button>
@@ -635,13 +731,13 @@ def create_html_report(
 
     <section id="tabTop" class="tab-content active">
         <div class="card">
-            <h2>熱門課程前 10 名</h2>
+            <h2>最難中選課程前 10 名</h2>
             <div class="note">
-                熱門度倍率 = 待分發人數 / 人數限制。倍率越高，代表該課程需求越高。
-                志願序門檻則表示依照目前報名資料推估，填到第幾志願仍可能有機會中選。
+                本分頁依照門檻志願序中選率由低到高排序。中選率越低，代表該課程競爭越激烈。
+                顏色由紅、橙、黃、綠表示中選率由低到高，方便快速判斷選課風險。
             </div>
             <div class="table-container">
-                {top_10.to_html(index=False, table_id="topTable")}
+                {top_10.to_html(index=False, table_id="topTable", escape=False)}
             </div>
         </div>
     </section>
@@ -655,7 +751,7 @@ def create_html_report(
             </div>
             <input type="text" id="prioritySearch" placeholder="搜尋課程代號、課程名稱、老師、建議..." onkeyup="searchTable('prioritySearch', 'priorityTable')">
             <div class="table-container">
-                {priority_display.to_html(index=False, table_id="priorityTable")}
+                {priority_display.to_html(index=False, table_id="priorityTable", escape=False)}
             </div>
         </div>
     </section>
@@ -676,7 +772,7 @@ def create_html_report(
             <h2>課表明細</h2>
             <input type="text" id="scheduleSearch" placeholder="搜尋課程名稱、老師、星期、教室..." onkeyup="searchTable('scheduleSearch', 'scheduleDetailTable')">
             <div class="table-container">
-                {schedule_detail_display.to_html(index=False, table_id="scheduleDetailTable")}
+                {schedule_detail_display.to_html(index=False, table_id="scheduleDetailTable", escape=False)}
             </div>
         </div>
     </section>
@@ -742,13 +838,20 @@ def main():
     priority_analysis = read_required_csv("analysis/course_priority_analysis.csv")
     # student_estimated = read_required_csv("analysis/student_estimated_accept_rate.csv")
 
+    # 若 course_priority_analysis.csv 已經移除 time_room，
+    # 這裡會從 courses.csv 補回，讓課表顯示仍可正常產生。
+    if "time_room" not in priority_analysis.columns and "time_room" in courses.columns:
+        priority_analysis = priority_analysis.merge(
+            courses[["course_id", "time_room"]],
+            on="course_id",
+            how="left"
+        )
+
     # 保險：確保數字欄位為數字
     numeric_cols = [
         "maximum_number",
         "number_of_assigned",
         "number_of_selected",
-        "popularity_ratio",
-        "over_capacity",
         "priority_1_count",
         "cutoff_priority",
         "cutoff_priority_count",
