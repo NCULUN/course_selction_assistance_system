@@ -12,6 +12,52 @@ headers = {
 }
 
 
+COURSE_INFO_FIELDS = [
+    "course_id",
+    "serial_number_course_code",
+    "course_name",
+    "instructor",
+    "department",
+    "educational_system",
+    "time_room",
+    "required_or_elective",
+    "credit",
+    "semester_type",
+    "lecture_language",
+    "code_card",
+    "maximum_number",
+    "number_of_assigned",
+    "number_of_selected"
+]
+
+# 每個欄位都會多輸出一個 xxx_source_status，讓後續分析知道資料可信度。
+COURSE_INFO_SOURCE_FIELDS = [f"{field}_source_status" for field in COURSE_INFO_FIELDS]
+
+COURSE_INFO_CHECK_FIELDS = [
+    "student_list_count",
+    "number_of_assigned_check_status"
+]
+
+COURSE_INFO_CSV_FIELDS = COURSE_INFO_FIELDS + COURSE_INFO_SOURCE_FIELDS + COURSE_INFO_CHECK_FIELDS
+
+COUNT_FIELDS = {
+    "maximum_number",
+    "number_of_assigned",
+    "number_of_selected"
+}
+
+SOURCE_OFFICIAL = "official"
+SOURCE_FALLBACK_STUDENT_COUNT = "fallback_student_count"
+SOURCE_MISSING = "missing"
+SOURCE_UNKNOWN = "unknown"
+
+CHECK_MATCH = "match"
+CHECK_MISMATCH = "mismatch"
+CHECK_NO_OFFICIAL_NUMBER = "no_official_number"
+CHECK_NO_STUDENT_LIST = "no_student_list"
+
+
+
 def save_all_course_info_to_csv(course_infos):
     """
     將多門課的基本資料存成同一份 courses.csv
@@ -23,23 +69,7 @@ def save_all_course_info_to_csv(course_infos):
     Path("output").mkdir(exist_ok=True)
     csv_path = Path("output/courses.csv")
 
-    fieldnames = [
-        "course_id",
-        "serial_number_course_code",
-        "course_name",
-        "instructor",
-        "department",
-        "educational_system",
-        "time_room",
-        "required_or_elective",
-        "credit",
-        "semester_type",
-        "lecture_language",
-        "code_card",
-        "maximum_number",
-        "number_of_assigned",
-        "number_of_selected"
-    ]
+    fieldnames = COURSE_INFO_CSV_FIELDS
 
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -110,6 +140,111 @@ def extract_between(text, start_key, end_keys):
 
     return text[start_index:end_index].strip()
 
+
+
+def is_empty(value):
+    """
+    判斷欄位是否沒有抓到資料。
+    """
+    return value is None or str(value).strip() == ""
+
+
+def is_positive_or_zero_integer_text(value):
+    """
+    判斷欄位是否為可以安全轉成整數的字串。
+    例如："0"、"50"、"367"。
+    """
+    return re.fullmatch(r"\d+", str(value).strip()) is not None
+
+
+def source_status_field(field_name):
+    """
+    將欄位名稱轉成來源狀態欄位名稱。
+    例如：number_of_assigned -> number_of_assigned_source_status
+    """
+    return f"{field_name}_source_status"
+
+
+def resolve_official_field(field_name, value):
+    """
+    根據官方 Course Information 抓到的欄位內容，決定欄位值與來源狀態。
+
+    official：官方欄位有值，且數字欄位格式正確。
+    missing：官方欄位空白或完全沒抓到。
+    unknown：官方欄位有內容，但數字欄位不是可安全使用的整數。
+    """
+    value = "" if value is None else str(value).strip()
+
+    if value == "":
+        return "", SOURCE_MISSING
+
+    if field_name in COUNT_FIELDS and not is_positive_or_zero_integer_text(value):
+        return value, SOURCE_UNKNOWN
+
+    return value, SOURCE_OFFICIAL
+
+
+def add_source_status(course_info):
+    """
+    替每個課程基本資料欄位補上 xxx_source_status。
+    這一步只根據 Course Information 官方欄位判斷，尚不做 fallback。
+    """
+    for field_name in COURSE_INFO_FIELDS:
+        value, status = resolve_official_field(
+            field_name,
+            course_info.get(field_name, "")
+        )
+        course_info[field_name] = value
+        course_info[source_status_field(field_name)] = status
+
+    # course_id 是從 crs 參數而來，不是從頁面文字 extract_between 抓到；
+    # 但它是我們實際請求官方課程頁的識別碼，所以在輸出中視為 official。
+    course_info["course_id_source_status"] = SOURCE_OFFICIAL
+
+    course_info.setdefault("student_list_count", "")
+    course_info.setdefault("number_of_assigned_check_status", "")
+
+    return course_info
+
+
+def apply_student_count_fallback(course_info, students):
+    """
+    針對 number_of_assigned 套用 fallback 規則。
+
+    優先來源：Course Information 的 Number of Assigned。
+    fallback 條件：官方欄位缺失或格式不可用，且修課名單成功解析出至少一筆學生資料。
+    缺資料：官方欄位缺失，且沒有可用修課名單可推估。
+    unknown：官方欄位有內容但格式不可用，且沒有可用修課名單可推估。
+    """
+    student_count = len(students)
+    course_info["student_list_count"] = student_count
+
+    assigned_value = str(course_info.get("number_of_assigned", "")).strip()
+    assigned_source = course_info.get(
+        "number_of_assigned_source_status",
+        SOURCE_MISSING
+    )
+
+    # 官方 Number of Assigned 可用時，保留官方資料，只做一致性檢查。
+    if assigned_source == SOURCE_OFFICIAL and is_positive_or_zero_integer_text(assigned_value):
+        if student_count == 0:
+            course_info["number_of_assigned_check_status"] = CHECK_NO_STUDENT_LIST
+        elif int(assigned_value) == student_count:
+            course_info["number_of_assigned_check_status"] = CHECK_MATCH
+        else:
+            course_info["number_of_assigned_check_status"] = CHECK_MISMATCH
+        return course_info
+
+    # 官方 Number of Assigned 缺失或不可用，但修課名單有資料，可以用學生列數推估待分發人數。
+    if student_count > 0:
+        course_info["number_of_assigned"] = str(student_count)
+        course_info["number_of_assigned_source_status"] = SOURCE_FALLBACK_STUDENT_COUNT
+        course_info["number_of_assigned_check_status"] = CHECK_NO_OFFICIAL_NUMBER
+        return course_info
+
+    # 沒有官方數字，也沒有學生名單，就維持原本 missing / unknown。
+    course_info["number_of_assigned_check_status"] = CHECK_NO_STUDENT_LIST
+    return course_info
 
 def parse_course_info(crs_id):
     """
@@ -224,6 +359,8 @@ def parse_course_info(crs_id):
         ),
     }
 
+    course_info = add_source_status(course_info)
+
     return course_info
 
 
@@ -238,23 +375,7 @@ def save_course_info_to_csv(course_info):
     Path("output").mkdir(exist_ok=True)
     csv_path = Path(f"output/course_{course_info['course_id']}_info.csv")
 
-    fieldnames = [
-        "course_id",
-        "serial_number_course_code",
-        "course_name",
-        "instructor",
-        "department",
-        "educational_system",
-        "time_room",
-        "required_or_elective",
-        "credit",
-        "semester_type",
-        "lecture_language",
-        "code_card",
-        "maximum_number",
-        "number_of_assigned",
-        "number_of_selected"
-    ]
+    fieldnames = COURSE_INFO_CSV_FIELDS
 
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -471,32 +592,35 @@ def main():
                 failed_courses.append((crs_id, "沒有抓到課程名稱"))
                 continue
 
+            # 3. 解析修課名單
+            students = parse_student_list(crs_id)
+            all_students.extend(students)
+
+            # 4. 根據修課名單補 fallback 與可信度標記
+            course_info = apply_student_count_fallback(course_info, students)
             all_course_infos.append(course_info)
 
             print("\n===== 課程基本資料 =====")
             print("course_id:", course_info["course_id"])
             print("course_name:", course_info["course_name"])
             print("instructor:", course_info["instructor"])
-            print("maximum_number:", course_info["maximum_number"])
-            print("number_of_assigned:", course_info["number_of_assigned"])
-            print("number_of_selected:", course_info["number_of_selected"])
-
-            # 3. 解析修課名單
-            students = parse_student_list(crs_id)
-            all_students.extend(students)
-
+            print("maximum_number:", course_info["maximum_number"], course_info["maximum_number_source_status"])
+            print("number_of_assigned:", course_info["number_of_assigned"], course_info["number_of_assigned_source_status"])
+            print("number_of_selected:", course_info["number_of_selected"], course_info["number_of_selected_source_status"])
             print(f"修課名單人數：{len(students)}")
 
-            # 4. 做簡單檢查：待分發人數是否等於修課名單筆數
-            assigned_count = str(course_info["number_of_assigned"]).strip()
+            assigned_check_status = course_info.get("number_of_assigned_check_status", "")
 
-            if assigned_count.isdigit():
-                if int(assigned_count) == len(students):
-                    print("資料檢查：待分發人數與修課名單人數一致")
-                else:
-                    print("資料檢查：待分發人數與修課名單人數不一致")
-                    print("number_of_assigned:", assigned_count)
-                    print("students:", len(students))
+            if assigned_check_status == CHECK_MATCH:
+                print("資料檢查：待分發人數與修課名單人數一致")
+            elif assigned_check_status == CHECK_MISMATCH:
+                print("資料檢查：待分發人數與修課名單人數不一致")
+                print("number_of_assigned:", course_info["number_of_assigned"])
+                print("students:", len(students))
+            elif assigned_check_status == CHECK_NO_OFFICIAL_NUMBER:
+                print("資料檢查：官方待分發人數缺失，已用修課名單人數 fallback")
+            elif assigned_check_status == CHECK_NO_STUDENT_LIST:
+                print("資料檢查：無法用修課名單驗證待分發人數")
 
         except Exception as e:
             print(f"課程 {crs_id} 發生錯誤：{e}")
